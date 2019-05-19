@@ -1,0 +1,198 @@
+---
+title: "PROJETO 2, Prevendo Demanda de Estoque com Base em Vendas"
+ALUNO: EDUARDO FRIGINI DE JESUS 
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+library(data.table)
+library("gmodels") 
+library(psych)
+library(lattice) 
+require(ggplot2)
+library(randomForest)
+```
+
+
+```{r}
+dados_originais <- fread("train.csv", sep = ",", header = TRUE, stringsAsFactors = TRUE)
+dados  <- dados_originais[sample(1:nrow(dados_originais), 1000, replace = F)]
+str(dados)
+```
+
+Os dados brutos contém 74180464 linhas (observacos) e 11 colunas (variaveis).
+Foram carregados apenas 1000 linhas para poder fazer os testes e nao ficar muito demorado
+A coluna "Demanda_uni_equil" é o target (alvo).
+
+```{r}
+
+to.factors <- function(df, variables){
+  for (variable in variables){
+    df[[variable]] <- as.factor(df[[variable]])
+  }
+  return(df)
+}
+```
+
+Variáveis do tipo fator
+nao converti as outras pq eram mts categorias e a floresta randomica nao processa mts categorias
+
+```{r}
+colunas_F <- c("Semana", "Canal_ID")
+dados <- to.factors(df = dados, variables = colunas_F)
+```
+
+Corrigir caso hajam dados NA
+
+```{r}
+dados <- na.omit(dados)
+str(dados)
+head(dados)
+```
+
+Analise exploratoria dos dados
+
+```{r}
+summary(dados$Demanda_uni_equil)
+
+mean(dados$Demanda_uni_equil) 
+median(dados$Demanda_uni_equil) 
+quantile(dados$Demanda_uni_equil) 
+quantile(dados$Demanda_uni_equil, probs = c(0.01, 0.95)) 
+quantile(dados$Demanda_uni_equil, seq(from = 0, to = 1, by = 0.10))
+IQR(dados$Demanda_uni_equil) 
+range(dados$Demanda_uni_equil) 
+diff(range(dados$Demanda_uni_equil))
+sd(dados$Demanda_uni_equil) 
+var(dados$Demanda_uni_equil) 
+
+```
+
+A variavel alvo esta com muitos outlyers, dai vou restringir ao valores menores que 0.90 quartil
+
+```{r}
+quartil_90 <- quantile(dados$Demanda_uni_equil, probs = 0.90)
+dados_sem_ouliers <- dados[Demanda_uni_equil<=quartil_90[[1]],]
+plot(dados_sem_ouliers$Demanda_uni_equil)
+sd(dados_sem_ouliers$Demanda_uni_equil) #  4.35
+var(dados_sem_ouliers$Demanda_uni_equil) # 19
+
+```
+
+Explorando os dados graficamente
+Correlacao forte com Venta_Roy e Venta_Uni_Roy
+OBSERVACOES:
+ * Venta_uni_hoy e Venta_hoy sao colineares
+ * Dev_uni_proxima e Dev Proxima sao colineares
+
+```{r}
+plot(dados_sem_ouliers$Semana)
+hist(dados_sem_ouliers$Ruta_SAK)
+
+plot(dados_sem_ouliers$Demanda_uni_equil) # target e esta com outliers
+hist(dados_sem_ouliers$Demanda_uni_equil) # dados concentrados no zero
+boxplot(dados_sem_ouliers$Demanda_uni_equil)
+
+plot(dados_sem_ouliers$Agencia_ID)
+plot(dados_sem_ouliers$Canal_ID) # Predominancia do canal 1
+
+cols <- c("Venta_uni_hoy", "Venta_hoy", "Dev_uni_proxima", "Dev_proxima", "Demanda_uni_equil") 
+cor(dados[, cols, with=FALSE])
+pairs.panels(dados[, cols, with=FALSE])
+
+```
+
+Mapa de Correlação
+
+```{r}
+# Vetor com os métodos de correlação
+metodos <- c("pearson", "spearman")
+
+# Aplicando os métodos de correlação com a função cor()
+cors <- lapply(metodos, function(method) 
+  (cor(dados[, cols, with=FALSE], method = method)))
+
+head(cors)
+
+# Preparando o plot
+plot.cors <- function(x, labs){
+  diag(x) <- 0.0 
+  plot( levelplot(x, 
+                  main = paste("Plot de Correlação usando Método", labs),
+                  scales = list(x = list(rot = 90), cex = 1.0)) )
+}
+
+Map(plot.cors, cors, metodos)
+
+```
+
+Avalidando a importância das variaveis sem as variaveis colineares
+
+```{r}
+modelo <- randomForest(Demanda_uni_equil ~ . - Venta_hoy
+                       - Dev_proxima, 
+                       data = dados_sem_ouliers, 
+                       ntree = 100, 
+                       nodesize = 10,
+                       importance = TRUE)
+varImpPlot(modelo)
+
+```
+
+ Removendo as variaveis menos importantes ou colineares
+
+```{r}
+dados_ok <- dados_sem_ouliers
+dados_ok$Dev_proxima <- NULL
+dados_ok$Venta_hoy <- NULL
+dados_ok$Cliente_ID <- NULL
+dados_ok$Agencia_ID <- NULL
+str(dados_ok)
+```
+
+Gerando dados de treino e de teste
+
+```{r}
+sample <- sample.int(n = nrow(dados_ok), size = floor(.7*nrow(dados_sem_ouliers)), replace = F)
+treino <- dados_ok[sample, ]
+teste  <- dados_ok[-sample, ]
+
+```
+
+Treinando o modelo linear (usando os dados de treino)
+
+```{r}
+
+modelo_lm <- lm(Demanda_uni_equil ~ ., data = treino)
+modelo_lm
+
+```
+
+Prevendo demanda de produtos
+
+```{r}
+
+previsao1 <- predict(modelo_lm)
+View(previsao1)
+plot(treino$Demanda_uni_equil, previsao1)
+
+previsao2 <- predict(modelo_lm, teste)
+View(previsao2)
+plot(teste$Demanda_uni_equil, previsao2)
+
+```
+
+Avaliando a Performance do Modelo
+
+```{r}
+
+summary(modelo_lm)
+
+# Adjusted R-squared:  0.9923
+```
